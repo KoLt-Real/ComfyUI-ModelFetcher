@@ -1,4 +1,5 @@
-"""The handlers must not block the event loop, and must keep their contract.
+"""The handlers must not block the event loop, and must keep their contract — and refuse
+anyone who is not on the machine running ComfyUI.
 
 Needs aiohttp, which ships with ComfyUI. Run outside a ComfyUI environment, the test skips
 itself (exit code 77) instead of turning red.
@@ -58,9 +59,13 @@ def ck(n, c, e=""):
     if not c: fails.append(n)
 
 class FakeReq:
-    def __init__(self, body):
+    # ``remote`` is aiohttp's socket peername: the local browser by default. ``headers``
+    # carries a forged X-Forwarded-For so the test can prove the gate never reads it.
+    def __init__(self, body, remote="127.0.0.1", headers=None):
         self._b = body
         self.query = {}
+        self.remote = remote
+        self.headers = headers or {}
     async def json(self): return self._b
 
 def body_of(resp):
@@ -122,7 +127,8 @@ async def main():
     dl = R.routes.handlers[("POST", "/cf_mf/download")]
     enqueued = []
     R.manager.enqueue = lambda *a, **k: enqueued.append(a)
-    job = {"url": "https://x/a.safetensors", "filename": "a.safetensors", "category": "checkpoints"}
+    job = {"url": "https://huggingface.co/x/resolve/main/a.safetensors",
+           "filename": "a.safetensors", "category": "checkpoints"}
     d = body_of(await dl(FakeReq({"jobs": [
         dict(job, id="ok", base_dir=ckpt),
         dict(job, id="out", base_dir=out_ckpt),
@@ -146,6 +152,67 @@ async def main():
     # analysis with no URL at all (the _no_sizes path)
     empty = body_of(await analyze(FakeReq({"notes": [{"node_id": 2, "title": "", "text": "pas de lien"}]})))
     ck("note with no link -> 0 models, no error", empty["ok"] and empty["models"] == [], empty)
+
+    # --- the host allow-list: what a note's author may not choose, the API refuses --------
+    d = body_of(await dl(FakeReq({"jobs": [
+        dict(job, id="cdn", url="https://cdn-lfs-us-1.hf.co/repo/abc", base_dir=ckpt),
+        dict(job, id="evil", url="https://evil.example/a.safetensors", base_dir=ckpt),
+        dict(job, id="lookalike", url="https://huggingface.co.evil.example/a", base_dir=ckpt),
+        dict(job, id="creds", url="https://huggingface.co@evil.example/a", base_dir=ckpt),
+        dict(job, id="ftp", url="ftp://huggingface.co/a", base_dir=ckpt),
+    ]})))
+    ck("an allow-listed CDN host is accepted", [q["id"] for q in d["queued"]] == ["cdn"], d)
+    ck("hosts off the allow-list are refused with the host named",
+       [(r["id"], r["reason"]) for r in d["rejected"]] == [
+           ("evil", "host not allowed: evil.example"),
+           ("lookalike", "host not allowed: huggingface.co.evil.example"),
+           ("creds", "URL must not carry credentials"),
+           ("ftp", "URL is not http(s)")], d["rejected"])
+
+    # --- the token route never writes junk, and never validates it either -----------------
+    set_token = R.routes.handlers[("POST", "/cf_mf/token")]
+    validated = []
+    R.hf_token.validate = lambda tok: (validated.append(tok), (False, None))[1]
+    for label, tok, err in (("a token with a newline", "hf_abc\nrm -rf", "invalid token"),
+                            ("a token with a space", "hf_abc def", "invalid token"),
+                            ("an over-long token", "x" * 600, "invalid token"),
+                            ("a blank token", "   ", "empty token"),
+                            ("a non-string token", 123, "empty token")):
+        r = await set_token(FakeReq({"token": tok}))
+        ck(f"{label} -> 400", r.status == 400 and body_of(r)["error"] == err, (r.status, body_of(r)))
+    ck("malformed tokens never reach validation", validated == [], validated)
+
+    # --- the local-only gate: loopback peers only, the opt-out is the server's env --------
+    status_h = R.routes.handlers[("GET", "/cf_mf/status")]
+    gated = (("analyze", analyze, {"notes": [NOTE]}), ("count", count, {"notes": [NOTE]}),
+             ("download", dl, {"jobs": []}), ("cancel", R.routes.handlers[("POST", "/cf_mf/cancel")], {}),
+             ("status", status_h, None), ("token GET", R.routes.handlers[("GET", "/cf_mf/token")], None),
+             ("token POST", set_token, {"token": "x"}),
+             ("token/clear", R.routes.handlers[("POST", "/cf_mf/token/clear")], None))
+    for label, remote in (("a LAN peer", "192.168.1.20"), ("a public peer", "203.0.113.9"),
+                          ("a link-local peer", "fe80::1%eth0"), ("an unknown peer", None),
+                          ("an unparsable peer", "not-an-ip")):
+        for name, handler, body in gated:
+            r = await handler(FakeReq(body, remote=remote))
+            ck(f"{name} from {label} -> 403",
+               r.status == 403 and body_of(r)["error"] == "local_only", (name, remote, r.status))
+    for remote in ("127.0.0.1", "127.0.0.2", "::1", "::ffff:127.0.0.1"):
+        r = await status_h(FakeReq(None, remote=remote))
+        ck(f"loopback peer {remote} -> served", r.status == 200 and body_of(r)["ok"], r.status)
+    r = await status_h(FakeReq(None, remote="192.168.1.20", headers={"X-Forwarded-For": "127.0.0.1"}))
+    ck("a forged X-Forwarded-For does not open the gate", r.status == 403, r.status)
+    r = await status_h(FakeReq(None, remote="127.0.0.1", headers={"X-Forwarded-For": "203.0.113.9"}))
+    ck("a proxied loopback peer is still served (the header is never read)", r.status == 200)
+    ck("the 403 says how to opt in",
+       "CF_MF_ALLOW_REMOTE" in body_of(await status_h(FakeReq(None, remote="10.0.0.5")))["message"])
+    os.environ["CF_MF_ALLOW_REMOTE"] = "1"
+    try:
+        r = await status_h(FakeReq(None, remote="192.168.1.20"))
+        ck("CF_MF_ALLOW_REMOTE=1 -> remote peers served", r.status == 200, r.status)
+    finally:
+        del os.environ["CF_MF_ALLOW_REMOTE"]
+    r = await status_h(FakeReq(None, remote="192.168.1.20"))
+    ck("the opt-out is read live: unset -> refused again", r.status == 403, r.status)
 
 asyncio.run(main())
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'async routes OK'}")

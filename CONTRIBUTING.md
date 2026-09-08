@@ -8,7 +8,7 @@ them before your first patch.
 
 [`AGENTS.md`](AGENTS.md) is the reference: it lists every invariant, with the code that
 enforces it and the test that guards it, and every entry is there because the thing it
-describes went wrong once. Nothing here overrides it. The two that are security
+describes went wrong once. Nothing here overrides it. The ones that are security
 invariants deserve the emphasis:
 
 1. **The token stays on a leash** (AGENTS.md invariant 1). URLs come from workflow
@@ -22,7 +22,16 @@ invariants deserve the emphasis:
    Category names and subfolders also come from notes or from the client:
    `scanner.resolve_category()` strips traversal segments, `routes._safe_join()`
    re-checks containment, and `base_dir` must already be registered for the category.
-   Both layers must stay — `tests/test_security.py` covers them.
+   The downloader then re-checks the final path itself (`scanner.is_allowed_dest`) before
+   writing. All three layers must stay — `tests/test_security.py` covers them.
+3. **The routes answer the local machine only** (AGENTS.md invariant 13). Every handler is
+   wrapped in `access.local_only`, which reads the socket peer address and nothing else;
+   the opt-out is an environment variable on the server, never anything a request can
+   send. A new route gets the decorator.
+4. **Only allow-listed hosts are contacted, on every redirect hop** (AGENTS.md invariant
+   14). `urlpolicy.check_url` is the predicate and `urlpolicy.open_url` the only place that
+   follows a redirect — never `allow_redirects=True`. `tests/test_routes.py` and
+   `tests/test_downloader_resume.py` cover both.
 
 ## Running the tests
 

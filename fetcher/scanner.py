@@ -292,6 +292,39 @@ def classify(ref: ModelRef, cat: CategoryInfo,
     }
 
 
+def allowed_write_roots() -> list[str]:
+    """Every folder a download may land under: ``models/`` plus each registered category
+    folder (extra paths included), minus ``output/<category>``.
+
+    This is the union of ``dest_dirs()`` over every category, plus ``models_dir`` itself (an
+    unknown category is created right under it). Realpaths, deduplicated; empty when
+    ``folder_paths`` is unavailable — and an empty list allows nothing.
+    """
+    try:
+        fp = _fp()
+        dirs = [fp.models_dir]
+        for entry in fp.folder_names_and_paths.values():
+            dirs.extend(entry[0])
+    except Exception:
+        return []
+    roots: list[str] = []
+    for d in _without_output(dirs):
+        rp = os.path.realpath(d)
+        if rp not in roots:
+            roots.append(rp)
+    return roots
+
+
+def is_allowed_dest(path: str) -> bool:
+    """May a file be written at ``path``? Second line of defence, checked by the downloader
+    itself right before it touches the disk: whatever it was handed, the destination must sit
+    under one of the folders ComfyUI registered for models. ``routes.download`` already
+    confines the path it builds; this makes the writer refuse anything else on its own.
+    """
+    rp = os.path.realpath(path)
+    return any(is_under(rp, root) for root in allowed_write_roots())
+
+
 def is_under(path: str, root: str) -> bool:
     """Is ``path`` ``root`` itself or inside its tree? (paths must already be normalised)
 

@@ -138,7 +138,8 @@ export async function openPopup(notes) {
     });
     const data = await resp.json();
     if (seq !== analyzeSeq) return;
-    if (!data.ok) throw new Error(data.error || "analysis failed");
+    // A 403 from the local-only gate carries a message saying how to opt in: show that.
+    if (!data.ok) throw new Error(data.message || data.error || "analysis failed");
     state.categories = data.categories || {};
     state.knownCategories = data.known_categories || [];
     state.workflowKey = key;
@@ -360,7 +361,7 @@ function buildRow(m) {
   row.className = "cf-mf-row";
   row.dataset.id = m.id;
 
-  const preChecked = m.status === "missing" && m.category_known;
+  const preChecked = m.status === "missing" && m.category_known && !hostBlocked(m);
   const catMeta = state.categories[m.category];
   const locations = catMeta?.locations || [];
   const defaultLoc = locations.find((l) => l.is_default) || locations[0] || null;
@@ -547,7 +548,8 @@ function buildIdleButton(m) {
   const dlBtn = document.createElement("button");
   dlBtn.className = "cf-mf-dl-one";
   dlBtn.textContent = "Download";
-  dlBtn.disabled = (m.status === "installed");
+  dlBtn.disabled = (m.status === "installed") || hostBlocked(m);
+  if (hostBlocked(m)) dlBtn.title = HOST_BLOCKED_MSG;
   dlBtn.addEventListener("click", () => downloadOne(m));
   return dlBtn;
 }
@@ -881,8 +883,17 @@ function updateSummary() {
 }
 
 function canDownload(m) {
-  return !!(m._dlCategory || m.category) && m.status !== "installed";
+  return !!(m._dlCategory || m.category) && m.status !== "installed" && !hostBlocked(m);
 }
+
+// The server refused to even probe this URL: its host is not on the download allow-list.
+// Nothing the popup offers can change that, so the row says so instead of a dead button.
+function hostBlocked(m) {
+  return m.remote_size_error === "host_not_allowed";
+}
+
+const HOST_BLOCKED_MSG =
+  "This host is not on the download allow-list (CF_MF_ALLOWED_HOSTS — see the README).";
 
 // ---------------------------------------------------------------------------
 // HuggingFace token panel (beginner guidance + paste)
@@ -954,6 +965,10 @@ function wireTokenForm(panel) {
         setStatus(status, "ok",
           `✓ Saved — signed in as ${esc(d.username || "your account")}. Re-checking models…`);
         setTimeout(() => openPopup(lastNotes), 700);
+      } else if (d.message || d.error) {
+        // Refused before validation (malformed token, or a caller the server does not
+        // serve): say what the server said rather than blaming the token's value.
+        setStatus(status, "err", "✗ " + esc(d.message || d.error));
       } else {
         setStatus(status, "err",
           "✗ That token doesn't look valid — please check it and try again.");
@@ -1032,7 +1047,7 @@ function jobFor(m) {
 
 async function downloadOne(m) {
   if (!canDownload(m)) {
-    flashRow(m.id, "Choose a destination folder first.");
+    flashRow(m.id, hostBlocked(m) ? HOST_BLOCKED_MSG : "Choose a destination folder first.");
     return;
   }
   await postDownload([jobFor(m)]);
@@ -1058,6 +1073,12 @@ async function postDownload(jobs) {
       body: JSON.stringify({ jobs }),
     });
     const data = await r.json();
+    if (!data.ok) {
+      // Refused as a whole (the local-only gate answers 403 with no per-job list): every
+      // row posted must leave the downloading state, or it would spin forever.
+      for (const j of jobs) setRowError(j.id, data.message || data.error || "refused");
+      return;
+    }
     for (const rej of data.rejected || []) {
       setRowError(rej.id, rej.reason || "refused");
     }

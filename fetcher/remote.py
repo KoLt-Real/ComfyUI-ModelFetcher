@@ -14,7 +14,7 @@ import time
 
 import requests
 
-from . import hf_token
+from . import hf_token, urlpolicy
 
 logger = logging.getLogger("comfyfactory.modelfetcher")
 
@@ -52,7 +52,13 @@ def invalidate(url: str | None = None) -> None:
 
 
 def _fetch(url: str) -> tuple[int | None, str | None]:
-    """Size of a URL. HuggingFace URLs go through the official library."""
+    """Size of a URL. HuggingFace URLs go through the official library.
+
+    A host outside the allow-list is answered without any network call: the probe itself is
+    an outbound request the note's author would otherwise control.
+    """
+    if urlpolicy.check_url(url):
+        return None, "host_not_allowed"
     if hf_token.is_hf_host(url):
         via_hub = _fetch_via_hub(url)
         if via_hub is not None:
@@ -101,8 +107,8 @@ def _fetch_generic(url: str) -> tuple[int | None, str | None]:
         cl = r.headers.get("Content-Length")
         if r.status_code == 200 and cl and cl.isdigit():
             return int(cl), None
-        # 2) Follow the redirect.
-        r2 = requests.head(url, allow_redirects=True, timeout=10, headers=headers)
+        # 2) Follow the redirect — by hand, every hop checked against the allow-list.
+        r2 = urlpolicy.open_url("HEAD", url, headers=headers, timeout=10)
         if r2.status_code in (401, 403):
             return None, "401_gated"
         if r2.status_code == 404:
@@ -111,5 +117,7 @@ def _fetch_generic(url: str) -> tuple[int | None, str | None]:
         if cl2 and cl2.isdigit():
             return int(cl2), None
         return None, "no_size"
+    except urlpolicy.HostNotAllowed:
+        return None, "host_not_allowed"
     except requests.RequestException:
         return None, "network"

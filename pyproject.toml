@@ -1,7 +1,7 @@
 [project]
 name = "comfyui-modelfetcher"
 description = "Top-bar button that reads a workflow's Markdown notes, downloads the models it needs into the right folder, and relinks loader nodes to copies you already own."
-version = "1.1.0"
+version = "1.2.0"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 # Nothing to install: only `requests` and `aiohttp`, both already required by ComfyUI.
