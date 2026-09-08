@@ -6,6 +6,11 @@
   proof). Progress is pushed on the websocket (``cf_mf.*`` events).
 - ``POST /cf_mf/cancel`` / ``GET /cf_mf/status``.
 - ``GET|POST /cf_mf/token`` (+ ``/clear``): state and registration of the HuggingFace token.
+
+Every route is loopback-only (``access.local_only``): the caller must be on the machine that
+runs ComfyUI, unless the operator sets ``CF_MF_ALLOW_REMOTE=1``. Every URL a job may fetch
+must pass ``urlpolicy.check_url`` (host allow-list), and every destination is confined twice —
+here, and again by the downloader before it writes.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from aiohttp import web
 from server import PromptServer
 
-from . import hf_token, remote, scanner
+from . import access, hf_token, remote, scanner, urlpolicy
 from .downloader import manager
 from .notes_parser import parse_notes
 
@@ -62,6 +67,7 @@ def _scan_disk(cat_cache: dict, all_dirs: list[str]) -> tuple[dict, dict]:
 
 
 @routes.post("/cf_mf/analyze")
+@access.local_only
 async def analyze(request):
     try:
         body = await request.json()
@@ -136,6 +142,7 @@ async def analyze(request):
 
 
 @routes.post("/cf_mf/count")
+@access.local_only
 async def count(request):
     """Light count (no network request) of how many models are still to download.
 
@@ -183,6 +190,7 @@ def _safe_join(base: str, *parts: str) -> str | None:
 
 
 @routes.post("/cf_mf/download")
+@access.local_only
 async def download(request):
     try:
         body = await request.json()
@@ -203,8 +211,11 @@ async def download(request):
         if not jid or not url or not filename:
             rejected.append({"id": jid, "reason": "missing fields"})
             continue
-        if not url.lower().startswith(("http://", "https://")):
-            rejected.append({"id": jid, "reason": "URL is not http(s)"})
+        # Scheme, no credentials, host on the allow-list: what the note's author may not
+        # choose, the API does not accept either.
+        reason = urlpolicy.check_url(url)
+        if reason:
+            rejected.append({"id": jid, "reason": reason})
             continue
         if os.sep in filename or (os.altsep and os.altsep in filename) or filename in (".", ".."):
             rejected.append({"id": jid, "reason": "invalid filename"})
@@ -236,6 +247,7 @@ async def download(request):
 
 
 @routes.post("/cf_mf/cancel")
+@access.local_only
 async def cancel(request):
     try:
         body = await request.json()
@@ -250,6 +262,7 @@ async def cancel(request):
 
 
 @routes.get("/cf_mf/status")
+@access.local_only
 async def status(request):
     return web.json_response({"ok": True, **manager.status()})
 
@@ -257,6 +270,7 @@ async def status(request):
 # --- HuggingFace token: never returned to the client, only its state -------------
 
 @routes.get("/cf_mf/token")
+@access.local_only
 async def get_token_state(request):
     return web.json_response({
         "ok": True,
@@ -266,15 +280,21 @@ async def get_token_state(request):
 
 
 @routes.post("/cf_mf/token")
+@access.local_only
 async def set_token(request):
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
 
-    token = (body.get("token") or "").strip()
+    token = body.get("token")
+    token = token.strip() if isinstance(token, str) else ""
     if not token:
         return web.json_response({"ok": False, "error": "empty token"}, status=400)
+    # One printable line or nothing: the token file must never hold anything else, and junk
+    # does not deserve a network round-trip.
+    if not hf_token.looks_like_token(token):
+        return web.json_response({"ok": False, "error": "invalid token"}, status=400)
 
     # HTTP round-trip to HuggingFace (up to 10 s): off the event loop.
     valid, username = await asyncio.to_thread(hf_token.validate, token)
@@ -288,6 +308,7 @@ async def set_token(request):
 
 
 @routes.post("/cf_mf/token/clear")
+@access.local_only
 async def clear_token(request):
     hf_token.clear_token()
     remote.invalidate()

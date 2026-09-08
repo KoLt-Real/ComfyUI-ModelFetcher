@@ -1,11 +1,18 @@
-"""Download resume: Range honoured, Range ignored, .part kept or discarded.
+"""Download resume: Range honoured, Range ignored, .part kept or discarded — and the two
+guards the worker applies on its own: redirects stay on the host allow-list, and the
+destination stays under the model folders.
 
 Serves a real local HTTP server — no external network access.
 """
 import os, sys, types, http.server, socketserver, threading, tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# The worker refuses any destination outside the registered model folders, and any host
+# outside the allow-list: the test's tmp dir is the models dir, and the local server is
+# allow-listed the way an operator would do it (CF_MF_ALLOWED_HOSTS).
+tmp = tempfile.mkdtemp()
+os.environ["CF_MF_ALLOWED_HOSTS"] = "127.0.0.1"
 fp = types.ModuleType("folder_paths")
-fp.models_dir="/m"
+fp.models_dir=tmp
 fp.folder_names_and_paths={}
 fp.get_user_directory=lambda:"/u"
 fp.map_legacy=lambda n:n
@@ -29,6 +36,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
     served_ranges = []
 
     def do_GET(self):
+        if self.path == "/redir":            # same host: must be followed, Range and all
+            self.send_response(302)
+            self.send_header("Location", "/model.safetensors")
+            self.end_headers()
+            return
+        if self.path == "/evil":             # off the allow-list: must NOT be followed
+            self.send_response(302)
+            self.send_header("Location", "http://blocked.invalid/model.safetensors")
+            self.end_headers()
+            return
         rng = self.headers.get("Range")
         Handler.served_ranges.append(rng)
         start = 0
@@ -52,9 +69,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 socketserver.TCPServer.allow_reuse_address = True
 srv = socketserver.TCPServer(("127.0.0.1", 0), Handler)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
-URL = f"http://127.0.0.1:{srv.server_address[1]}/model.safetensors"
+PORT = srv.server_address[1]
+URL = f"http://127.0.0.1:{PORT}/model.safetensors"
 
-tmp = tempfile.mkdtemp()
 dest = os.path.join(tmp, "model.safetensors")
 part = dl._part_path(dest, URL)
 
@@ -123,6 +140,61 @@ ck("final file correct after cancel then resume", open(dest, "rb").read() == BOD
 evs = run("exists")
 ck("file already there -> no re-download",
    any(p.get("note") == "already_exists" for _e, p in evs), evs)
+
+# ---------- redirect on the same host: followed, and the resume survives it --
+os.remove(dest)
+REDIR = f"http://127.0.0.1:{PORT}/redir"
+rpart = dl._part_path(dest, REDIR)
+open(rpart, "wb").write(BODY[:HALF])
+Handler.served_ranges.clear(); events.clear()
+mgr._download(dl._Job("redir", REDIR, dest, False))
+ck("redirect followed to completion", os.path.exists(dest) and open(dest, "rb").read() == BODY,
+   events)
+ck("the Range header reached the final hop", Handler.served_ranges == [f"bytes={HALF}-"],
+   Handler.served_ranges)
+ck("no .part left after a redirected download", not os.path.exists(rpart))
+
+# ---------- redirect off the allow-list: refused, one request, nothing written
+def count_requests(fn):
+    calls = []
+    orig = dl.urlpolicy.requests.request
+    def counting(method, url, **kw):
+        calls.append(url)
+        return orig(method, url, **kw)
+    dl.urlpolicy.requests.request = counting
+    try:
+        fn()
+    finally:
+        dl.urlpolicy.requests.request = orig
+    return calls
+
+os.remove(dest)
+EVIL = f"http://127.0.0.1:{PORT}/evil"
+events.clear()
+calls = count_requests(lambda: mgr._download(dl._Job("evil", EVIL, dest, False)))
+ck("redirect off the allow-list -> host_not_allowed",
+   any(p.get("code") == "host_not_allowed" for _e, p in events), events)
+ck("only the first hop was ever requested", calls == [EVIL], calls)
+ck("nothing written for a refused redirect",
+   not os.path.exists(dest) and not os.path.exists(dl._part_path(dest, EVIL)), os.listdir(tmp))
+
+# ---------- source URL off the allow-list: refused before any request --------
+events.clear()
+calls = count_requests(lambda: mgr._download(
+    dl._Job("blocked", "http://blocked.invalid/model.safetensors", dest, False)))
+ck("blocked host -> host_not_allowed", any(p.get("code") == "host_not_allowed" for _e, p in events),
+   events)
+ck("blocked host -> no request at all", calls == [], calls)
+
+# ---------- destination outside the model folders: refused before any I/O ---
+outside = os.path.join(tempfile.mkdtemp(), "model.safetensors")
+events.clear(); Handler.served_ranges.clear()
+calls = count_requests(lambda: mgr._download(dl._Job("outside", URL, outside, False)))
+ck("destination outside the model folders -> dest_refused",
+   any(p.get("code") == "dest_refused" for _e, p in events), events)
+ck("nothing written outside", not os.path.exists(outside)
+   and not os.path.exists(dl._part_path(outside, URL)))
+ck("no request for a refused destination", calls == [], calls)
 
 srv.shutdown()
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'resume OK'}")

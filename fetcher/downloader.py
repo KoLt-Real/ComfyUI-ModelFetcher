@@ -22,7 +22,7 @@ import time
 
 import requests
 
-from . import hf_token
+from . import hf_token, scanner, urlpolicy
 
 logger = logging.getLogger("comfyfactory.modelfetcher")
 
@@ -187,6 +187,18 @@ class DownloadManager:
 
     def _download(self, job: _Job) -> None:
         dest = job.dest
+        # The worker trusts nothing it is handed. ``routes.download`` already confines the
+        # destination and checks the host, but this is the code that writes to the disk and
+        # talks to the network: it re-checks both, so a caller reaching the manager some other
+        # way gains nothing (AGENTS.md invariants 2, 14 and 15).
+        if not scanner.is_allowed_dest(dest):
+            _push("cf_mf.error", {"id": job.id, "code": "dest_refused",
+                                  "message": "Destination is outside the model folders."})
+            return
+        reason = urlpolicy.check_url(job.url)
+        if reason:
+            _push("cf_mf.error", {"id": job.id, "code": "host_not_allowed", "message": reason})
+            return
         part = _part_path(dest, job.url)
         if os.path.exists(dest) and not job.overwrite:
             _push("cf_mf.done", {"id": job.id, "path": dest, "size": _safe_size(dest),
@@ -201,8 +213,10 @@ class DownloadManager:
             headers["Range"] = "bytes=%d-" % resume_from
 
         try:
-            r = requests.get(job.url, stream=True, timeout=(10, 120),
-                             headers=headers, allow_redirects=True)
+            # Redirects are followed by ``open_url`` alone: every hop is checked against the
+            # host allow-list, and the token never travels past the host it was issued for.
+            r = urlpolicy.open_url("GET", job.url, stream=True, timeout=(10, 120),
+                                   headers=headers)
             if r.status_code == 416 and resume_from:
                 # The ``.part`` is larger than the resource: it no longer matches what we are
                 # downloading (file replaced upstream, or already complete). Start over.
@@ -210,8 +224,8 @@ class DownloadManager:
                 _cleanup(part)
                 resume_from = 0
                 headers.pop("Range", None)
-                r = requests.get(job.url, stream=True, timeout=(10, 120),
-                                 headers=headers, allow_redirects=True)
+                r = urlpolicy.open_url("GET", job.url, stream=True, timeout=(10, 120),
+                                       headers=headers)
             with r:
                 if r.status_code in (401, 403):
                     _push("cf_mf.error", {"id": job.id, "code": "http_%d" % r.status_code,
@@ -267,6 +281,15 @@ class DownloadManager:
             os.replace(part, dest)
             _push("cf_mf.done", {"id": job.id, "path": dest, "size": _safe_size(dest)})
 
+        # ``requests.RequestException`` derives from ``IOError`` (= ``OSError``): its clauses
+        # must come first, or the disk branch below swallows every network error as "io".
+        except urlpolicy.HostNotAllowed as e:
+            # A redirect left the allow-list: nothing was fetched from there, and a Retry
+            # would only meet the same redirect.
+            _push("cf_mf.error", {"id": job.id, "code": "host_not_allowed", "message": str(e)})
+        except requests.RequestException as e:
+            # Network: the .part is kept, a Retry will resume where we stopped.
+            _push("cf_mf.error", {"id": job.id, "code": "network", "message": str(e)})
         except OSError as e:
             if getattr(e, "errno", None) == 28:  # ENOSPC
                 # The only case where the .part is discarded: keeping it would make a full
@@ -275,9 +298,6 @@ class DownloadManager:
                 _push("cf_mf.error", {"id": job.id, "code": "disk_full", "message": "Disk full."})
             else:
                 _push("cf_mf.error", {"id": job.id, "code": "io", "message": str(e)})
-        except requests.RequestException as e:
-            # Network: the .part is kept, a Retry will resume where we stopped.
-            _push("cf_mf.error", {"id": job.id, "code": "network", "message": str(e)})
 
 
 def _part_path(dest: str, url: str) -> str:

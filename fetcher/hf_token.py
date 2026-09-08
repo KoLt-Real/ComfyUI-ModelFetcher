@@ -42,10 +42,14 @@ _HF_HOSTS = ("huggingface.co", "hf.co")
 
 
 def is_hf_host(url: str) -> bool:
-    """Does the URL point at HuggingFace? The only criterion for sending the token."""
+    """Does the URL point at HuggingFace? The only criterion for sending the token.
+
+    Same suffix rule as the download allow-list (``urlpolicy.host_matches``): an entry or a
+    subdomain of it — never a look-alike such as ``huggingface.co.evil.com``.
+    """
     from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-    return host in _HF_HOSTS or host.endswith(".huggingface.co") or host.endswith(".hf.co")
+    from .urlpolicy import host_matches
+    return host_matches(urlparse(url).hostname or "", _HF_HOSTS)
 
 
 def auth_headers(url: str) -> dict:
@@ -79,10 +83,29 @@ def load_saved_into_env() -> None:
         logger.exception("cf_mf: failed to load the saved token")
 
 
+# Longest token shape HuggingFace has issued is well under this; the bound only keeps a
+# runaway payload out of the file.
+TOKEN_MAX_LEN = 512
+
+
+def looks_like_token(token: str) -> bool:
+    """Could this string be a token at all? One printable line, no whitespace, bounded.
+
+    The token file must never hold anything else: the route checks this before spending a
+    network round-trip on validation, and ``save_token`` refuses to write otherwise.
+    """
+    token = token or ""
+    return (0 < len(token) <= TOKEN_MAX_LEN
+            and token.isprintable()
+            and not any(c.isspace() for c in token))
+
+
 def save_token(token: str) -> None:
     """Apply the token immediately + persist it with mode 0600."""
     global _env_set_by_plugin
     token = (token or "").strip()
+    if not looks_like_token(token):
+        raise ValueError("refusing to save a malformed token")
     os.environ["HF_TOKEN"] = token
     _env_set_by_plugin = True
     path = _token_path()
