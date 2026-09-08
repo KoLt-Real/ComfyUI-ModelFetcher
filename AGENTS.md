@@ -18,6 +18,8 @@ fetcher/
   remote.py          remote size via HEAD (cached)
   downloader.py      queue + single worker thread, .part writes, websocket progress
   routes.py          the /cf_mf/* API
+  access.py          loopback-only gate on every route (CF_MF_ALLOW_REMOTE opt-out)
+  urlpolicy.py       host allow-list + the only code that follows redirects
   hf_token.py        token storage/validation + the HuggingFace-only auth header
 web/                 frontend, plain ES modules — no build step, no bundler, no npm
   main.js            button, badge, note collection from the graph
@@ -33,10 +35,16 @@ tests/               see below — run them
    that builds an `Authorization` header, and it returns `{}` for any non-HF host. Model URLs
    come from workflow notes, which are untrusted input — a shared workflow must never be able
    to point the downloader at an attacker's server *with your credentials attached*. Never
-   reintroduce a global `_auth_headers()`.
-2. **Download destinations stay under the models directory.** `scanner.resolve_category()`
-   strips `..` and absolute segments; `routes._safe_join()` re-checks containment with
-   `scanner.is_under()`. A client-supplied `category` is untrusted. Both layers must stay.
+   reintroduce a global `_auth_headers()`. On a redirect, `urlpolicy.open_url()` drops the
+   header as soon as the host changes and never adds one back: a bearer on a signed CDN URL
+   is refused by the CDN, and recomputing `auth_headers()` per hop would send it to
+   `*.hf.co` where it is not wanted.
+2. **Download destinations stay under the models directory — checked twice.**
+   `scanner.resolve_category()` strips `..` and absolute segments; `routes._safe_join()`
+   re-checks containment with `scanner.is_under()`; and `downloader._download()` re-checks
+   the final `dest` with `scanner.is_allowed_dest()` (every registered model folder, `output/`
+   excluded) before its first `os.makedirs`. A client-supplied `category` is untrusted, and
+   the worker trusts nothing it is handed. All three layers must stay.
 3. **`base_dir` must be a folder already registered for that category** (main + extra paths).
    Never accept an arbitrary path from the client. The allowed set is `scanner.dest_dirs()` —
    the *same* function that builds the UI menu, so what is not offered is not accepted.
@@ -78,6 +86,23 @@ tests/               see below — run them
    model between "duplicate" and "different content".
 12. **Frontend has no build step.** Plain ES modules loaded by ComfyUI from `web/`. Do not add
    a bundler, TypeScript, or npm dependencies.
+13. **Every `/cf_mf` route is loopback-only.** `access.local_only` wraps all eight handlers
+   (`@routes.post(...)` *above* `@access.local_only`, so the registered function is the gated
+   one) and reads `request.remote` — aiohttp's socket peername — never a header such as
+   `X-Forwarded-For`. The only opt-out is the server's environment (`CF_MF_ALLOW_REMOTE=1`):
+   a request can never open the gate for itself. A new route gets the decorator, no
+   exceptions: `analyze` makes outbound requests and returns absolute paths, `status` leaks
+   state, everything else mutates.
+14. **Only allow-listed hosts are ever contacted, on every hop.** `urlpolicy.check_url()` is
+   the one predicate (scheme, no credentials, host on `urlpolicy.allowed_hosts()`), applied in
+   `routes.download`, `remote._fetch` (before any probe) and `downloader._download`.
+   `urlpolicy.open_url()` is the *only* code that follows a redirect; it re-runs the predicate
+   on each hop. Never pass `allow_redirects=True` to `requests` anywhere in the plugin. The
+   list is extended by the operator alone (`CF_MF_ALLOWED_HOSTS`, `HF_ENDPOINT`), never by a
+   note or a request. `check_url` does no DNS and no I/O — it runs on the event loop.
+15. **The token file holds one printable line or nothing.** `hf_token.looks_like_token()`
+   gates the route (400, before any network) and `save_token()` (raises). The token is still
+   never returned to the client.
 
 ## Conventions
 
@@ -102,13 +127,13 @@ Python and JS tests need nothing beyond what ComfyUI already provides; the brows
 |---|---|
 | `tests/test_scanner_classify.py` | status ladder, proven equivalent to the pre-simplification version over the full truth table |
 | `tests/test_scanner_relink.py` | relink target: subfolders, extra paths, size mismatch; the *no dead-end row* invariant over 162 disk layouts, and that the automatic pick is always one of the offered copies |
-| `tests/test_security.py` | token host allowlist, path-traversal confinement |
+| `tests/test_security.py` | token host allowlist, download host allowlist (look-alikes, credentials in the URL, env extensions), the downloader's destination check, token hygiene, path-traversal confinement |
 | `tests/test_notes_parser.py` | unique, stable, order-independent model ids |
 | `tests/test_remote_cache.py` | sizes cached forever, errors briefly, `invalidate()` |
 | `tests/test_downloader.py` | worker expiry/enqueue race, cancel after re-enqueue |
-| `tests/test_downloader_resume.py` | resume against a real local server: Range honoured, ignored, stale `.part`, cancel keeps bytes |
+| `tests/test_downloader_resume.py` | resume against a real local server: Range honoured, ignored, stale `.part`, cancel keeps bytes; redirects followed with `Range` intact, a redirect off the allow-list refused after one request, a destination outside the model folders refused before any I/O |
 | `tests/test_hf_delegation.py` | huggingface_hub delegation and its fallback, both paths |
-| `tests/test_routes.py` | handlers stay off the event loop; response contract |
+| `tests/test_routes.py` | handlers stay off the event loop; response contract; the loopback-only gate on all eight routes (peers, forged headers, the env opt-out); host refusal reasons; malformed tokens answered 400 without validation |
 | `tests/js/relink.test.js` | widget matching, subgraphs, promoted-widget double counting |
 | `tests/e2e/test_popup.py` | Relink flow, the copy picker, per-workflow state, error/flash rows, and the relink line's independence from the download state machine |
 | `tests/e2e/test_token_panel.py` | token panel: save, remove, env-vs-file |
@@ -151,6 +176,17 @@ run time — there is no duplicated copy to keep in sync.
   categories apart.
 - The download worker exits after an idle timeout: it must de-register itself **while holding
   the lock**, or a job enqueued at that instant is never picked up.
+- **`requests.RequestException` is an `OSError`.** In `_download`, the network clauses must
+  come *before* `except OSError`, or every network error (and `HostNotAllowed`) is reported
+  as `io`. It was that way for a while, silently.
+- **An unregistered category that is a symlink out of `models/`** passes `routes._safe_join`
+  (base is realpath'd) but is refused by `scanner.is_allowed_dest` (roots are realpath'd,
+  the symlink target is not one of them). Registered categories are fine — their realpath
+  *is* a root. Accepted: widening the roots to follow arbitrary symlinks would defeat the
+  check.
+- **Tests that download from a local server** must allow-list it (`CF_MF_ALLOWED_HOSTS=
+  127.0.0.1` before importing the plugin) and point `folder_paths.models_dir` at their
+  temporary directory: the worker refuses everything else, which is the point.
 - A server may answer a `Range` request with plain `200` (whole file). Anything other than
   `206` must truncate and restart, never append — appending would double the file.
 - `416` means the `.part` is larger than the resource: it belongs to another version of the

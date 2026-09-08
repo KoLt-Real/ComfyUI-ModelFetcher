@@ -214,6 +214,34 @@ All routes live under `/cf_mf` and are registered on ComfyUI's own server.
 
 Progress is pushed on the ComfyUI websocket as `cf_mf.progress`, `cf_mf.done`, `cf_mf.error`.
 
+### Security
+
+These routes write to your disk and hold your HuggingFace token, so they are locked down
+by default. Three rules, each one enforced server-side and covered by `tests/test_security.py`
+and `tests/test_routes.py`:
+
+- **Local only.** Every `/cf_mf` route answers **loopback peers only** (`127.0.0.1`, `::1`)
+  and returns `403` to anyone else, even when ComfyUI runs with `--listen`. The check reads the
+  socket's peer address, never a header. If you drive ComfyUI from another machine, or run it
+  in a container with a mapped port (the browser then arrives from the bridge address), set
+  `CF_MF_ALLOW_REMOTE=1` in ComfyUI's environment — it is your call to expose the routes to
+  whoever can reach that port.
+- **Host allow-list.** A model is only fetched from `huggingface.co`, `hf.co`, `civitai.com`,
+  `github.com`, and the CDNs those redirect to (`githubusercontent.com`,
+  `r2.cloudflarestorage.com`) — subdomains included, look-alikes excluded. Redirects are
+  followed one hop at a time and every hop is checked. The host of `HF_ENDPOINT` (mirrors)
+  is accepted automatically; add your own with `CF_MF_ALLOWED_HOSTS=my-mirror.example,other.example`.
+  A note pointing elsewhere shows the row with its Download button disabled, and
+  `POST /cf_mf/download` refuses the job with `host not allowed: <host>`.
+- **Confined writes.** A destination is resolved server-side from the category and must be
+  one of the folders ComfyUI registered for models (`extra_model_paths.yaml` included, never
+  `output/`). The downloader re-checks this on its own right before it touches the disk, so
+  it refuses anything outside those folders whatever it was handed. The token file lives at a
+  fixed path in ComfyUI's `user` folder and only ever holds a single printable line.
+
+**Upgrading to 1.2:** if you used the popup from a browser on another machine, it now shows
+a 403 message until `CF_MF_ALLOW_REMOTE=1` is set on the ComfyUI side.
+
 ---
 
 ## Architecture
@@ -226,6 +254,8 @@ Progress is pushed on the ComfyUI websocket as `cf_mf.progress`, `cf_mf.done`, `
 | `fetcher/downloader.py` | queue + worker, resumable `.part` writes, websocket progress |
 | `fetcher/routes.py` | the `/cf_mf/*` API; blocking I/O runs off the event loop |
 | `fetcher/hf_token.py` | token storage, validation, and the HuggingFace-only auth header |
+| `fetcher/access.py` | the loopback-only gate on every route (`CF_MF_ALLOW_REMOTE` opt-out) |
+| `fetcher/urlpolicy.py` | host allow-list (`CF_MF_ALLOWED_HOSTS`, `HF_ENDPOINT`) and the only redirect-following code |
 | `web/main.js` | top-bar button, badge, note collection |
 | `web/popup.js` | the panel: rows, destinations, downloads, token, per-workflow state |
 | `web/relink.js` | reads and rewrites loader widgets in the open graph |
@@ -249,7 +279,8 @@ suite needs Playwright (`pip install playwright && playwright install chromium`)
 cleanly when it is absent, as is anything else that cannot run in the current environment.
 
 They cover the status classification (proven equivalent over its full truth table), relink
-target resolution, the security boundaries (token host allowlist, path-traversal confinement),
+target resolution, the security boundaries (loopback-only routes, download host allowlist,
+token host allowlist, path-traversal confinement, the downloader's own destination check),
 model-id uniqueness, the remote-size cache, the downloader's concurrency races, the API
 contract and that handlers stay off the event loop, plus the popup itself in a real browser —
 Relink, per-workflow state, error rows and the token panel.
