@@ -79,6 +79,7 @@ NOTE = {"node_id": 1, "title": "t", "text":
 def slow_size(url):
     time.sleep(2.0)
     return (100, None)
+_real_fetch = remote._fetch   # the policy check lives in there; one case below needs it back
 remote._fetch = slow_size
 remote.invalidate()
 
@@ -181,6 +182,37 @@ async def main():
         r = await set_token(FakeReq({"token": tok}))
         ck(f"{label} -> 400", r.status == 400 and body_of(r)["error"] == err, (r.status, body_of(r)))
     ck("malformed tokens never reach validation", validated == [], validated)
+
+    # --- a JSON body that is not an object answers 400, never a 500 ------------------------
+    for label, body in (("a list", []), ("a string", "x"), ("a number", 3), ("null", None)):
+        for name, handler in (("analyze", analyze), ("count", count), ("download", dl),
+                              ("token POST", set_token)):
+            r = await handler(FakeReq(body))
+            ck(f"{name} with {label} body -> 400",
+               r.status == 400 and body_of(r)["error"] == "invalid JSON", (name, r.status))
+    r = await R.routes.handlers[("POST", "/cf_mf/cancel")](FakeReq([]))
+    ck("cancel with a list body -> a plain refusal, no 500", r.status == 200 and body_of(r)["ok"] is False)
+    r = await dl(FakeReq({"jobs": "nope"}))
+    ck("jobs not a list -> 400", r.status == 400 and body_of(r)["error"] == "invalid jobs")
+    d = body_of(await dl(FakeReq({"jobs": ["str", None, dict(job, id="fine", base_dir=ckpt)]})))
+    ck("a non-object job is rejected, the others still queue",
+       [q["id"] for q in d["queued"]] == ["fine"]
+       and [r["reason"] for r in d["rejected"]] == ["missing fields", "missing fields"], d)
+
+    # --- the badge never advertises a model the popup will refuse -------------------------
+    BLOCKED = {"node_id": 3, "title": "t", "text":
+               "**checkpoints**\n- [evil.safetensors](https://attacker.example/evil.safetensors)\n"}
+    c = body_of(await count(FakeReq({"notes": [BLOCKED]})))
+    ck("count: a refused URL is listed but not missing", c["total"] == 1 and c["missing"] == 0, c)
+    R.remote._fetch = _real_fetch   # the real probe: refused before any network for this host
+    R.remote.invalidate()
+    try:
+        a = body_of(await analyze(FakeReq({"notes": [BLOCKED]})))
+    finally:
+        R.remote._fetch = slow_size
+    ck("analyze: the row carries host_not_allowed and was never probed",
+       a["models"][0]["remote_size_error"] == "host_not_allowed"
+       and a["models"][0]["remote_size"] is None, a["models"][0])
 
     # --- the local-only gate: loopback peers only, the opt-out is the server's env --------
     status_h = R.routes.handlers[("GET", "/cf_mf/status")]

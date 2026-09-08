@@ -197,7 +197,8 @@ class DownloadManager:
             return
         reason = urlpolicy.check_url(job.url)
         if reason:
-            _push("cf_mf.error", {"id": job.id, "code": "host_not_allowed", "message": reason})
+            _push("cf_mf.error", {"id": job.id, "code": urlpolicy.refusal_code(reason),
+                                  "message": reason})
             return
         part = _part_path(dest, job.url)
         if os.path.exists(dest) and not job.overwrite:

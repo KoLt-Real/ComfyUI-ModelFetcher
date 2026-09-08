@@ -549,7 +549,7 @@ function buildIdleButton(m) {
   dlBtn.className = "cf-mf-dl-one";
   dlBtn.textContent = "Download";
   dlBtn.disabled = (m.status === "installed") || hostBlocked(m);
-  if (hostBlocked(m)) dlBtn.title = HOST_BLOCKED_MSG;
+  if (hostBlocked(m)) dlBtn.title = blockedMsg(m);
   dlBtn.addEventListener("click", () => downloadOne(m));
   return dlBtn;
 }
@@ -1047,7 +1047,7 @@ function jobFor(m) {
 
 async function downloadOne(m) {
   if (!canDownload(m)) {
-    flashRow(m.id, hostBlocked(m) ? HOST_BLOCKED_MSG : "Choose a destination folder first.");
+    flashRow(m.id, hostBlocked(m) ? blockedMsg(m) : "Choose a destination folder first.");
     return;
   }
   await postDownload([jobFor(m)]);

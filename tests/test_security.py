@@ -89,6 +89,22 @@ ck("the env never widens the token leash", hf_token.auth_headers("https://hf.cor
 del os.environ["CF_MF_ALLOWED_HOSTS"], os.environ["HF_ENDPOINT"]
 ck("the env is read live: unset -> refused again",
    urlpolicy.check_url("https://my-mirror.example/x") == "host not allowed: my-mirror.example")
+os.environ["CF_MF_ALLOWED_HOSTS"] = "127.0.0.1:8080, mirror.example:8443"
+ck("a host:port entry means the host, whatever the port",
+   urlpolicy.check_url("http://127.0.0.1:8080/x") is None
+   and urlpolicy.check_url("http://127.0.0.1:9/x") is None
+   and urlpolicy.check_url("https://mirror.example/x") is None, urlpolicy.allowed_hosts())
+ck("an IPv6 literal entry is kept whole", urlpolicy._clean_host("[::1]:8080") == "::1")
+del os.environ["CF_MF_ALLOWED_HOSTS"]
+ck("only the host reason maps to host_not_allowed",
+   urlpolicy.refusal_code("host not allowed: x") == "host_not_allowed"
+   and urlpolicy.refusal_code("URL is not http(s)") == "url_refused"
+   and urlpolicy.refusal_code("URL must not carry credentials") == "url_refused")
+from fetcher import remote
+ck("remote_size: off-list host -> host_not_allowed, no probe",
+   remote.remote_size("http://attacker.example/m.safetensors") == (None, "host_not_allowed"))
+ck("remote_size: credentials in the URL -> url_refused, not the allow-list's fault",
+   remote.remote_size("https://huggingface.co@evil.example/m") == (None, "url_refused"))
 
 # --- S4: the downloader only writes under the registered model folders -------
 fp.folder_names_and_paths = {
@@ -108,6 +124,13 @@ for path in ("/comfy/output/checkpoints/a.safetensors",
              "/etc/cron.d/x",
              "/comfy/user/cf_mf_hf_token.txt"):
     ck("dest refused: " + path, not scanner.is_allowed_dest(path))
+# A category whose only folder sits under output/ keeps it (dest_dirs' own fallback): what
+# the menu offers and the route accepts, the worker must not refuse.
+fp.folder_names_and_paths = {"onlyout": (["/comfy/output/onlyout"], set())}
+ck("output-only category: the worker accepts what dest_dirs offers",
+   scanner.dest_dirs(scanner.resolve_category("onlyout")) == ["/comfy/output/onlyout"]
+   and scanner.is_allowed_dest("/comfy/output/onlyout/a.safetensors"))
+ck("…without opening the rest of output/", not scanner.is_allowed_dest("/comfy/output/other/a"))
 fp.folder_names_and_paths = {}
 ck("nothing registered: models/ itself still allowed",
    scanner.is_allowed_dest("/comfy/models/x/a.safetensors"))

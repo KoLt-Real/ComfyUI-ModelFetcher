@@ -57,8 +57,9 @@ def _fetch(url: str) -> tuple[int | None, str | None]:
     A host outside the allow-list is answered without any network call: the probe itself is
     an outbound request the note's author would otherwise control.
     """
-    if urlpolicy.check_url(url):
-        return None, "host_not_allowed"
+    reason = urlpolicy.check_url(url)
+    if reason:
+        return None, urlpolicy.refusal_code(reason)
     if hf_token.is_hf_host(url):
         via_hub = _fetch_via_hub(url)
         if via_hub is not None:

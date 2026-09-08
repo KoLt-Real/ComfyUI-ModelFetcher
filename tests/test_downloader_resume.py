@@ -46,6 +46,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Location", "http://blocked.invalid/model.safetensors")
             self.end_headers()
             return
+        if self.path == "/echo-auth":        # says whether Authorization arrived
+            self.send_response(200)
+            self.send_header("X-Got-Auth", "yes" if self.headers.get("Authorization") else "no")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if self.path.startswith("/redir-to-"):   # /redir-to-<port>: same host, other port
+            self.send_response(302)
+            self.send_header("Location", f"http://127.0.0.1:{self.path.rsplit('-', 1)[1]}/echo-auth")
+            self.end_headers()
+            return
         rng = self.headers.get("Range")
         Handler.served_ranges.append(rng)
         start = 0
@@ -185,6 +196,18 @@ calls = count_requests(lambda: mgr._download(
 ck("blocked host -> host_not_allowed", any(p.get("code") == "host_not_allowed" for _e, p in events),
    events)
 ck("blocked host -> no request at all", calls == [], calls)
+
+# ---------- Authorization survives a same-origin hop, never an origin change --
+srv2 = socketserver.TCPServer(("127.0.0.1", 0), Handler)
+threading.Thread(target=srv2.serve_forever, daemon=True).start()
+PORT2 = srv2.server_address[1]
+AUTH = {"Authorization": "Bearer not-a-real-token"}
+r = dl.urlpolicy.open_url("GET", f"http://127.0.0.1:{PORT}/redir-to-{PORT}", headers=AUTH, timeout=5)
+ck("same origin redirect: Authorization kept", r.headers.get("X-Got-Auth") == "yes", r.headers)
+r = dl.urlpolicy.open_url("GET", f"http://127.0.0.1:{PORT}/redir-to-{PORT2}", headers=AUTH, timeout=5)
+ck("same host, other port: Authorization dropped (requests' own rule)",
+   r.headers.get("X-Got-Auth") == "no", r.headers)
+srv2.shutdown()
 
 # ---------- destination outside the model folders: refused before any I/O ---
 outside = os.path.join(tempfile.mkdtemp(), "model.safetensors")

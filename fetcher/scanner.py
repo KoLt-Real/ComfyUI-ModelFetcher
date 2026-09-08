@@ -296,19 +296,22 @@ def allowed_write_roots() -> list[str]:
     """Every folder a download may land under: ``models/`` plus each registered category
     folder (extra paths included), minus ``output/<category>``.
 
-    This is the union of ``dest_dirs()`` over every category, plus ``models_dir`` itself (an
-    unknown category is created right under it). Realpaths, deduplicated; empty when
-    ``folder_paths`` is unavailable — and an empty list allows nothing.
+    This is the union of ``dest_dirs()`` over every category — the *same* fallback included:
+    a category whose only folders sit under ``output/`` keeps them, since that is what the
+    menu offers and the route accepts — plus ``models_dir`` itself (an unknown category is
+    created right under it). Realpaths, deduplicated; empty when ``folder_paths`` is
+    unavailable — and an empty list allows nothing.
     """
     try:
         fp = _fp()
         dirs = [fp.models_dir]
         for entry in fp.folder_names_and_paths.values():
-            dirs.extend(entry[0])
+            cat_dirs = list(entry[0])
+            dirs.extend(_without_output(cat_dirs) or cat_dirs)
     except Exception:
         return []
     roots: list[str] = []
-    for d in _without_output(dirs):
+    for d in dirs:
         rp = os.path.realpath(d)
         if rp not in roots:
             roots.append(rp)

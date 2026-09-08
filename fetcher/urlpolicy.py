@@ -8,8 +8,9 @@ redirect from a friendly host could do the same one hop later. So:
 - ``check_url`` decides whether a URL may be fetched at all. It is pure string work (no DNS,
   no I/O) so that it can run on the aiohttp event loop.
 - ``open_url`` is the single place that follows redirects. Every hop goes through
-  ``check_url`` again, ``Authorization`` is dropped as soon as the host changes (exactly what
-  ``requests`` does on its own, and what signed CDN URLs require) and it is never added back.
+  ``check_url`` again, ``Authorization`` is dropped as soon as the origin (scheme, host or
+  port) changes — the rule ``requests`` applies on its own, and what signed CDN URLs
+  require — and it is never added back.
 
 The allow-list is operator-controlled: ``CF_MF_ALLOWED_HOSTS`` (comma-separated) extends it,
 and the host of ``HF_ENDPOINT`` (HuggingFace mirrors) is accepted automatically.
@@ -56,13 +57,19 @@ class RedirectError(requests.RequestException):
 
 
 def _clean_host(entry: str) -> str | None:
-    """One env/endpoint entry → a bare lower-case hostname (``None`` when empty)."""
+    """One env/endpoint entry → a bare lower-case hostname (``None`` when empty).
+
+    ``https://mirror.example:8443/path``, ``mirror.example:8443`` and ``mirror.example`` all
+    mean the same host: the allow-list is about hosts, ports are not part of the match.
+    """
     entry = (entry or "").strip()
     if not entry:
         return None
-    if "://" in entry:
-        entry = urlparse(entry).hostname or ""
-    return entry.strip().lower().rstrip(".") or None
+    try:
+        host = urlparse(entry if "://" in entry else "//" + entry).hostname or ""
+    except ValueError:
+        return None
+    return host.strip().lower().rstrip(".") or None
 
 
 def allowed_hosts() -> tuple[str, ...]:
@@ -83,6 +90,16 @@ def host_matches(host: str, allowed: tuple[str, ...] | list[str]) -> bool:
 
 def host_allowed(host: str) -> bool:
     return host_matches(host, allowed_hosts())
+
+
+HOST_REASON = "host not allowed: "
+
+
+def refusal_code(reason: str) -> str:
+    """Short code for a ``check_url`` reason: the host is the only fixable one on the
+    operator's side (``CF_MF_ALLOWED_HOSTS``), so the UI must not blame the allow-list for a
+    URL refused for its scheme or for carrying credentials."""
+    return "host_not_allowed" if reason.startswith(HOST_REASON) else "url_refused"
 
 
 def check_url(url: str) -> str | None:
@@ -107,24 +124,33 @@ def check_url(url: str) -> str | None:
     if not host:
         return "invalid URL"
     if not host_allowed(host):
-        return "host not allowed: %s" % host
+        return HOST_REASON + host
     return None
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    p = urlparse(url)
+    return (p.scheme.lower(), (p.hostname or "").lower(), p.port)
 
 
 def open_url(method: str, url: str, *, headers: dict | None = None, **kw) -> requests.Response:
     """``requests.request`` with redirects followed by hand, every hop policy-checked.
 
     ``headers`` are sent on every hop (``Range`` included, so a resume survives a redirect)
-    except ``Authorization``, dropped the moment the host changes and never re-added: the
-    token stays on the leash of ``hf_token.auth_headers`` (invariant 1), and signed CDN URLs
-    refuse a request carrying both a signature and a bearer.
+    except ``Authorization``, dropped the moment the origin — scheme, host or port — changes
+    and never re-added: the token stays on the leash of ``hf_token.auth_headers`` (invariant
+    1), it never travels down an ``https`` → ``http`` hop in clear, and signed CDN URLs
+    refuse a request carrying both a signature and a bearer. Same rule as ``requests``'
+    ``should_strip_auth``.
     """
     h = dict(headers or {})
     cur = url
     for _ in range(MAX_REDIRECTS + 1):
         reason = check_url(cur)
         if reason:
-            raise HostNotAllowed(urlparse(cur).hostname or "", cur)
+            if reason.startswith(HOST_REASON):
+                raise HostNotAllowed(urlparse(cur).hostname or "", cur)
+            raise RedirectError("%s (redirected to %s)" % (reason, cur))
         r = requests.request(method, cur, allow_redirects=False, headers=h, **kw)
         if r.status_code not in _REDIRECT_CODES:
             return r
@@ -133,7 +159,7 @@ def open_url(method: str, url: str, *, headers: dict | None = None, **kw) -> req
         if not location:
             raise RedirectError("redirect without a Location header from %s" % cur)
         nxt = urljoin(cur, location)
-        if (urlparse(nxt).hostname or "").lower() != (urlparse(cur).hostname or "").lower():
+        if _origin(nxt) != _origin(cur):
             h.pop("Authorization", None)
         cur = nxt
     raise RedirectError("too many redirects (%d) from %s" % (MAX_REDIRECTS, url))

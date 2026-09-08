@@ -35,6 +35,23 @@ async def _no_sizes() -> dict:
     """Empty counterpart of ``_probe_sizes`` when the note holds no URL at all."""
     return {}
 
+
+async def _json_object(request) -> dict | None:
+    """The request body as a JSON object — ``None`` for anything else (a 400, never a 500).
+
+    ``request.json()`` happily returns a list or a string; every handler then calls ``.get``
+    on it, and an ``AttributeError`` deep in a handler is a traceback in ComfyUI's log where a
+    400 belongs.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+_BAD_JSON = {"ok": False, "error": "invalid JSON"}
+
 # At plugin load time: reload a previously saved token into the environment.
 hf_token.load_saved_into_env()
 
@@ -69,10 +86,9 @@ def _scan_disk(cat_cache: dict, all_dirs: list[str]) -> tuple[dict, dict]:
 @routes.post("/cf_mf/analyze")
 @access.local_only
 async def analyze(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    body = await _json_object(request)
+    if body is None:
+        return web.json_response(_BAD_JSON, status=400)
 
     notes = body.get("notes") or []
     # Notes come from the client: a shape parse_notes cannot read must answer 400, like any
@@ -150,10 +166,9 @@ async def count(request):
     file of that name anywhere in the category's folders (the same-size/different-size
     duplicate distinction is not needed here).
     """
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    body = await _json_object(request)
+    if body is None:
+        return web.json_response(_BAD_JSON, status=400)
 
     notes = body.get("notes") or []
     if not isinstance(notes, list) or not all(isinstance(n, dict) for n in notes):
@@ -171,6 +186,11 @@ async def count(request):
 
     missing = 0
     for r in refs:
+        # A URL the download route would refuse is not "to download": the badge must not
+        # advertise a model the popup then shows with its button disabled. Pure parsing, so
+        # the route stays network-free.
+        if urlpolicy.check_url(r.url):
+            continue
         cls = scanner.classify(r, cat_cache[r.category], index, None)
         if cls["status"] in (scanner.ST_MISSING, scanner.ST_UNKNOWN):
             missing += 1
@@ -192,14 +212,18 @@ def _safe_join(base: str, *parts: str) -> str | None:
 @routes.post("/cf_mf/download")
 @access.local_only
 async def download(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    body = await _json_object(request)
+    if body is None:
+        return web.json_response(_BAD_JSON, status=400)
 
     jobs = body.get("jobs") or []
+    if not isinstance(jobs, list):
+        return web.json_response({"ok": False, "error": "invalid jobs"}, status=400)
     queued, rejected = [], []
     for j in jobs:
+        if not isinstance(j, dict):
+            rejected.append({"id": None, "reason": "missing fields"})
+            continue
         jid = j.get("id")
         url = (j.get("url") or "").strip()
         filename = (j.get("filename") or "").strip()
@@ -249,10 +273,7 @@ async def download(request):
 @routes.post("/cf_mf/cancel")
 @access.local_only
 async def cancel(request):
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
+    body = await _json_object(request) or {}
     if body.get("all"):
         manager.cancel_all()
         return web.json_response({"ok": True})
@@ -282,10 +303,9 @@ async def get_token_state(request):
 @routes.post("/cf_mf/token")
 @access.local_only
 async def set_token(request):
-    try:
-        body = await request.json()
-    except Exception:
-        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    body = await _json_object(request)
+    if body is None:
+        return web.json_response(_BAD_JSON, status=400)
 
     token = body.get("token")
     token = token.strip() if isinstance(token, str) else ""

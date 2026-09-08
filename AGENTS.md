@@ -36,14 +36,16 @@ tests/               see below — run them
    come from workflow notes, which are untrusted input — a shared workflow must never be able
    to point the downloader at an attacker's server *with your credentials attached*. Never
    reintroduce a global `_auth_headers()`. On a redirect, `urlpolicy.open_url()` drops the
-   header as soon as the host changes and never adds one back: a bearer on a signed CDN URL
-   is refused by the CDN, and recomputing `auth_headers()` per hop would send it to
-   `*.hf.co` where it is not wanted.
+   header as soon as the origin (scheme, host or port — `requests`' own rule) changes and
+   never adds one back: a bearer on a signed CDN URL is refused by the CDN, an `https` →
+   `http` hop must not carry it in clear, and recomputing `auth_headers()` per hop would
+   send it to `*.hf.co` where it is not wanted.
 2. **Download destinations stay under the models directory — checked twice.**
    `scanner.resolve_category()` strips `..` and absolute segments; `routes._safe_join()`
    re-checks containment with `scanner.is_under()`; and `downloader._download()` re-checks
    the final `dest` with `scanner.is_allowed_dest()` (every registered model folder, `output/`
-   excluded) before its first `os.makedirs`. A client-supplied `category` is untrusted, and
+   excluded — with `dest_dirs()`' own fallback, so a category living only under `output/` is
+   not offered by the menu and then refused by the worker) before its first `os.makedirs`. A client-supplied `category` is untrusted, and
    the worker trusts nothing it is handed. All three layers must stay.
 3. **`base_dir` must be a folder already registered for that category** (main + extra paths).
    Never accept an arbitrary path from the client. The allowed set is `scanner.dest_dirs()` —
