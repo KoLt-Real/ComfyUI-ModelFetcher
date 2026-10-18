@@ -236,6 +236,16 @@ class DownloadManager:
                                           "message": "File not found (404)."})
                     return
                 r.raise_for_status()
+                # A model is never a web page. A link to the page that DISPLAYS a file (a
+                # file-viewer URL, a login wall) still ends with the model's filename and
+                # answers 200: without this check its HTML would be saved under the model's
+                # name and reported installed. Refused before the .part is touched.
+                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if ctype == "text/html":
+                    _push("cf_mf.error", {"id": job.id, "code": "not_a_file",
+                                          "message": "The link opens a web page, not the file "
+                                                     "(check the URL in the note)."})
+                    return
 
                 # 206 = the resume was accepted. Any other 2xx means the server ignores
                 # ``Range`` and returns the whole file: rewrite from the start.

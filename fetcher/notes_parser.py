@@ -11,15 +11,17 @@ Target format (as observed on ComfyUI's 7 templates):
 - odd case (MoGe): a table + ``### Downloads`` with no bold heading → the category comes from
   the Storage Location tree only.
 
-Category resolution order: Storage Location tree > ``**bold**`` heading > None.
+Category resolution order: Storage Location tree > ``**bold**`` heading > folder named in the
+HuggingFace file path (registered categories only, see ``_category_from_url``) > None.
 """
 
 from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 # Recognised model file extensions.
 MODEL_EXTS = (
@@ -31,6 +33,7 @@ _FENCE_RE = re.compile(r"```[^\n]*\n(.*?)```", re.DOTALL)
 _MD_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)\s]+)\)")
 _RAW_URL_RE = re.compile(r"(?<![\(\w])(https?://[^\s<>\"')\]]+)")
 _BOLD_HEADING_RE = re.compile(r"^\s*\*\*([^*]+?)\*\*\s*:?\s*$")
+_MD_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 
 
 @dataclass
@@ -86,6 +89,61 @@ def _clean_url(url: str) -> str:
     return url.rstrip(".,);]")
 
 
+_HF_HOSTS = ("huggingface.co", "hf.co")
+
+
+def _hf_repo_path(url: str) -> tuple[list[str], int] | None:
+    """Path segments of a HuggingFace file URL, and the index of its ``blob``/``resolve`` verb.
+
+    ``/<org>/<repo>/<verb>/<rev>/<path>``, or ``/datasets|spaces/<org>/<repo>/<verb>/...``.
+    ``None`` when the path does not have that shape.
+    """
+    segs = urlparse(url).path.split("/")
+    i = 4 if len(segs) > 4 and segs[1] in ("datasets", "spaces") else 3
+    if len(segs) <= i + 2:
+        return None
+    return segs, i
+
+
+def _hf_file_url(url: str) -> str:
+    """HuggingFace file *page* (``/blob/``) → its download URL (``/resolve/``).
+
+    A ``blob`` URL ends with the model's filename, so it passes for a download link, but it
+    serves the HTML page that displays the file: downloaded as-is, that page lands on disk under
+    the model's name. Real templates link it by mistake
+    (``comfyanonymous/flux_text_encoders/blob/main/clip_l.safetensors``).
+    """
+    p = urlparse(url)
+    host = (p.hostname or "").lower().removeprefix("www.")
+    if host not in _HF_HOSTS:
+        return url
+    found = _hf_repo_path(url)
+    if not found or found[0][found[1]] != "blob":
+        return url
+    segs, i = found
+    segs[i] = "resolve"
+    return urlunparse(p._replace(path="/".join(segs)))
+
+
+def _category_from_url(url: str, is_category: Callable[[str], bool]) -> str | None:
+    """Folder of ``models/`` named by a HuggingFace file path: the last resort.
+
+    Repositories laid out for ComfyUI mirror its folders
+    (``.../resolve/main/split_files/diffusion_models/x.safetensors``), and a note can link a
+    file outside its ``**bold**`` lists (a tip, a community note). Only the path INSIDE the
+    repository is read, never the org or repo name, nearest folder first; and only a name the
+    caller registers counts: anything else would create a stray folder under ``models/``.
+    """
+    found = _hf_repo_path(url)
+    if not found or found[0][found[1]] != "resolve":
+        return None
+    segs, i = found
+    for seg in reversed(segs[i + 2:-1]):
+        if seg and is_category(seg):
+            return seg
+    return None
+
+
 def parse_storage_tree(block: str) -> dict[str, str]:
     """Parse a 'Model Storage Location' tree → {filename: path_relative_to_models}.
 
@@ -137,7 +195,8 @@ def parse_storage_tree(block: str) -> dict[str, str]:
     return result
 
 
-def _parse_one_note(text: str, title: str) -> list[ModelRef]:
+def _parse_one_note(text: str, title: str,
+                    is_category: Callable[[str], bool] | None = None) -> list[ModelRef]:
     refs: list[ModelRef] = []
 
     # 1) Storage Location tree(s): filename -> category mapping (takes precedence).
@@ -155,15 +214,19 @@ def _parse_one_note(text: str, title: str) -> list[ModelRef]:
         url = _clean_url(url)
         if not _is_download_url(url, label):
             return
+        # After the check, not before: a blob link to a README must stay a page link.
+        url = _hf_file_url(url)
         fname = label.strip() if _has_model_ext(label) else _filename_from_url(url)
         if not fname:
             fname = _filename_from_url(url) or label.strip()
         if not fname:
             return
-        # category: tree > bold heading > None
+        # category: tree > bold heading > folder in the URL > None
         cat = tree_map.get(fname)
         if cat is None and current_bold:
             cat = current_bold
+        if cat is None and is_category is not None:
+            cat = _category_from_url(url, is_category)
         cat = _norm_category(cat)
         key = (fname.lower(), url)
         if key in seen:
@@ -179,6 +242,10 @@ def _parse_one_note(text: str, title: str) -> list[ModelRef]:
         if hb:
             current_bold = hb.group(1)
             continue
+        if _MD_HEADING_RE.match(line):
+            # A new section ends the bold list: in image_qwen_image_layered, a "## FP8" tip
+            # after the **vae** list links a diffusion model, which would land in vae/.
+            current_bold = None
         matched_spans: list[tuple[int, int]] = []
         for m in _MD_LINK_RE.finditer(line):
             _add(m.group(1), m.group(2))
@@ -208,8 +275,13 @@ def _norm_category(cat: str | None) -> str | None:
     return c
 
 
-def parse_notes(notes: list[dict]) -> list[ModelRef]:
-    """notes = [{node_id, title, text}] → deduplicated list of ModelRef."""
+def parse_notes(notes: list[dict],
+                is_category: Callable[[str], bool] | None = None) -> list[ModelRef]:
+    """notes = [{node_id, title, text}] → deduplicated list of ModelRef.
+
+    ``is_category(name)`` says whether a folder name is a registered model category; without
+    it, the URL is never used to guess a category (the parser stays free of ComfyUI).
+    """
     out: list[ModelRef] = []
     seen: set[tuple[str, str]] = set()
     for note in notes or []:
@@ -217,7 +289,7 @@ def parse_notes(notes: list[dict]) -> list[ModelRef]:
         title = note.get("title") or ""
         if not text.strip():
             continue
-        for ref in _parse_one_note(text, title):
+        for ref in _parse_one_note(text, title, is_category):
             key = (ref.filename.lower(), ref.url)
             if key in seen:
                 continue

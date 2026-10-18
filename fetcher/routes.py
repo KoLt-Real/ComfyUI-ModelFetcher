@@ -79,7 +79,7 @@ async def analyze(request):
     # other malformed input — not leak an AttributeError as a 500.
     if not isinstance(notes, list) or not all(isinstance(n, dict) for n in notes):
         return web.json_response({"ok": False, "error": "invalid notes"}, status=400)
-    refs = parse_notes(notes)
+    refs = parse_notes(notes, scanner.is_known_category)
 
     # Category resolution (once per name).
     cat_cache: dict[str | None, scanner.CategoryInfo] = {}
@@ -123,11 +123,7 @@ async def analyze(request):
 
     # Every known category (feeds the select for unknown destinations).
     try:
-        import folder_paths
-        known_categories = sorted(
-            k for k in folder_paths.folder_names_and_paths
-            if k not in ("configs", "custom_nodes", "diffusers", "classifiers")
-        )
+        known_categories = scanner.known_categories()
     except Exception:
         known_categories = []
 
@@ -158,7 +154,8 @@ async def count(request):
     notes = body.get("notes") or []
     if not isinstance(notes, list) or not all(isinstance(n, dict) for n in notes):
         return web.json_response({"ok": False, "error": "invalid notes"}, status=400)
-    refs = parse_notes(notes)
+    # Same parse as analyze, or the badge would count rows the popup has already placed.
+    refs = parse_notes(notes, scanner.is_known_category)
     cat_cache: dict[str | None, scanner.CategoryInfo] = {}
     for r in refs:
         if r.category not in cat_cache:

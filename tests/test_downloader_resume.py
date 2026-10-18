@@ -1,6 +1,6 @@
 """Download resume: Range honoured, Range ignored, .part kept or discarded — and the two
-guards the worker applies on its own: redirects stay on the host allow-list, and the
-destination stays under the model folders.
+guards the worker applies on its own: redirects stay on the host allow-list, the
+destination stays under the model folders, and a web page is never saved as a model.
 
 Serves a real local HTTP server — no external network access.
 """
@@ -40,6 +40,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/model.safetensors")
             self.end_headers()
+            return
+        if self.path == "/page.safetensors":  # a file-viewer page: must NOT be saved
+            page = b"<!doctype html><html><body>model card</body></html>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
             return
         if self.path == "/evil":             # off the allow-list: must NOT be followed
             self.send_response(302)
@@ -195,6 +203,16 @@ ck("destination outside the model folders -> dest_refused",
 ck("nothing written outside", not os.path.exists(outside)
    and not os.path.exists(dl._part_path(outside, URL)))
 ck("no request for a refused destination", calls == [], calls)
+
+# ---------- a web page under a model's name: refused, nothing written -------
+PAGE = f"http://127.0.0.1:{PORT}/page.safetensors"
+pdest = os.path.join(tmp, "page.safetensors")
+events.clear()
+mgr._download(dl._Job("page", PAGE, pdest, False))
+ck("text/html answer -> not_a_file", any(p.get("code") == "not_a_file" for _e, p in events), events)
+ck("a web page is never reported installed", not any(e == "cf_mf.done" for e, _p in events), events)
+ck("nothing written for a web page",
+   not os.path.exists(pdest) and not os.path.exists(dl._part_path(pdest, PAGE)), os.listdir(tmp))
 
 srv.shutdown()
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'resume OK'}")

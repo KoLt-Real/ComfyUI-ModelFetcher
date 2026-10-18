@@ -128,10 +128,10 @@ Python and JS tests need nothing beyond what ComfyUI already provides; the brows
 | `tests/test_scanner_classify.py` | status ladder, proven equivalent to the pre-simplification version over the full truth table |
 | `tests/test_scanner_relink.py` | relink target: subfolders, extra paths, size mismatch; the *no dead-end row* invariant over 162 disk layouts, and that the automatic pick is always one of the offered copies |
 | `tests/test_security.py` | token host allowlist, download host allowlist (look-alikes, credentials in the URL, env extensions), the downloader's destination check, token hygiene, path-traversal confinement |
-| `tests/test_notes_parser.py` | unique, stable, order-independent model ids |
+| `tests/test_notes_parser.py` | unique, stable, order-independent model ids; HuggingFace `/blob/` links rewritten to `/resolve/`; category precedence tree > bold > URL folder (registered names only, never the repo name); a Markdown heading ends a bold list |
 | `tests/test_remote_cache.py` | sizes cached forever, errors briefly, `invalidate()` |
 | `tests/test_downloader.py` | worker expiry/enqueue race, cancel after re-enqueue |
-| `tests/test_downloader_resume.py` | resume against a real local server: Range honoured, ignored, stale `.part`, cancel keeps bytes; redirects followed with `Range` intact, a redirect off the allow-list refused after one request, a destination outside the model folders refused before any I/O |
+| `tests/test_downloader_resume.py` | resume against a real local server: Range honoured, ignored, stale `.part`, cancel keeps bytes; redirects followed with `Range` intact, a redirect off the allow-list refused after one request, a destination outside the model folders refused before any I/O, a `text/html` answer refused with nothing written |
 | `tests/test_hf_delegation.py` | huggingface_hub delegation and its fallback, both paths |
 | `tests/test_routes.py` | handlers stay off the event loop; response contract; the loopback-only gate on all eight routes (peers, forged headers, the env opt-out); host refusal reasons; malformed tokens answered 400 without validation |
 | `tests/js/relink.test.js` | widget matching, subgraphs, promoted-widget double counting |
@@ -174,6 +174,21 @@ run time — there is no duplicated copy to keep in sync.
   call it to "fix" a stale combo; add the value to `widget.options.values` instead.
 - A widget's own value list is the only reliable way to tell two same-named models of different
   categories apart.
+- **A HuggingFace `/blob/` URL is a web page**, not the file, yet its path ends with the model's
+  filename, so `_is_download_url()` accepts it. Downloaded as-is, ~118 KB of HTML landed on
+  disk as `clip_l.safetensors` and the row said *Installed*: 33 links across ComfyUI's own
+  templates had that shape. `_hf_file_url()` rewrites them to `/resolve/`, *after* the
+  download-URL check, or a `blob` link to a README would become a model. The worker also
+  refuses any `text/html` answer, for the page links no rule recognises.
+- **A bold heading only lasts until the next Markdown heading.** It used to run to the end of
+  the note: a `## FP8` tip after the `**vae**` list sent a 20 GB diffusion model to `vae/`, and
+  a `**Key Features:**` line became the category `key_features:`.
+- **The URL folder is the last resort, and only for registered names.** HuggingFace repos laid
+  out for ComfyUI mirror its folders, so `_category_from_url()` reads the path *inside* the repo
+  (never the org or repo name), nearest folder first. The predicate is
+  `scanner.is_known_category()`, the same set as the destination menu: an unregistered
+  folder (`transformer/`, `all_in_one/`) would create a stray directory under `models/`. Both
+  `analyze` and `count` pass it, or the badge would disagree with the popup.
 - The download worker exits after an idle timeout: it must de-register itself **while holding
   the lock**, or a job enqueued at that instant is never picked up.
 - **`requests.RequestException` is an `OSError`.** In `_download`, the network clauses must

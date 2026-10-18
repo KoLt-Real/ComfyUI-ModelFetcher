@@ -20,10 +20,29 @@ ST_DUP_DIFF = "duplicate_diff_size"
 ST_MISSING = "missing"
 ST_UNKNOWN = "unknown_dest"
 
+# Registered in folder_names_and_paths, but never where a downloaded model goes.
+NOT_MODEL_CATEGORIES = ("configs", "custom_nodes", "diffusers", "classifiers")
+
 
 def _fp():
     import folder_paths  # type: ignore
     return folder_paths
+
+
+def known_categories() -> list[str]:
+    """Every category a model can be downloaded to (feeds the menu of unknown destinations)."""
+    return sorted(k for k in _fp().folder_names_and_paths if k not in NOT_MODEL_CATEGORIES)
+
+
+def is_known_category(name: str) -> bool:
+    """Is ``name`` (legacy names included: unet, clip) one of ``known_categories()``?
+
+    The parser's only way to trust a folder named by a URL: same set as the menu, so a guessed
+    category is always one the user could have picked.
+    """
+    fp = _fp()
+    canonical = fp.map_legacy(name)
+    return canonical in fp.folder_names_and_paths and canonical not in NOT_MODEL_CATEGORIES
 
 
 def _output_root() -> str | None:

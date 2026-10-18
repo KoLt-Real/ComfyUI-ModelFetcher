@@ -23,10 +23,16 @@ progress](docs/ui-downloader.png)
 - Parses `MarkdownNote` / `Note` nodes of the open graph, **subgraphs included**.
 - Understands both note styles: `**checkpoints**`-style bold sections, and the
   `📂 ComfyUI/ → models/ → …` **"Model Storage Location" tree** (the tree wins — it is the
-  only one that expresses subfolders such as `checkpoints/SDXL`).
+  only one that expresses subfolders such as `checkpoints/SDXL`). A bold section ends at the
+  next Markdown heading.
+- A link outside both (a tip, a community note) takes its folder from the HuggingFace file
+  path when that folder is a category ComfyUI registers
+  (`…/resolve/main/split_files/diffusion_models/x.safetensors` → `diffusion_models`).
 - Recognises direct-download links: HuggingFace `/resolve/`, Civitai `/api/download/`,
   GitHub `/releases/download/`, or any URL ending in a model extension
-  (`.safetensors .ckpt .pt .pth .bin .sft .gguf .onnx .pkl .pt2`).
+  (`.safetensors .ckpt .pt .pth .bin .sft .gguf .onnx .pkl .pt2`). A HuggingFace `/blob/`
+  link (the page that displays the file) is turned into its `/resolve/` download link, and a
+  download that answers with a web page is refused instead of being saved as a model.
 - A **badge on the button** shows how many models are still missing, and refreshes on every
   workflow load, tab switch and finished download.
 
@@ -40,7 +46,7 @@ Each model is classified against your disk — every folder registered for the c
 | ≈ **Likely duplicate** | same filename, same size, but in a **subfolder** — the loader would not find it, so the row offers **Relink** |
 | ⚠ **Same name, different size** | same filename, different content — probably another version |
 | ⬇ **Missing** | not on disk |
-| ? **Unknown destination** | the note does not say where it goes — pick a folder yourself |
+| ? **Unknown destination** | neither the note nor the file's HuggingFace path says where it goes: pick a folder yourself |
 
 Sizes come from a `HEAD` request (HuggingFace's `x-linked-size`, else `Content-Length`), so
 "likely duplicate" means *same name **and** same byte count*.
