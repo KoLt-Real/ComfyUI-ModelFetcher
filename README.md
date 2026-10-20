@@ -228,10 +228,13 @@ and `tests/test_routes.py`:
 
 - **Local only.** Every `/cf_mf` route answers **loopback peers only** (`127.0.0.1`, `::1`)
   and returns `403` to anyone else, even when ComfyUI runs with `--listen`. The check reads the
-  socket's peer address, never a header. If you drive ComfyUI from another machine, or run it
-  in a container with a mapped port (the browser then arrives from the bridge address), set
-  `CF_MF_ALLOW_REMOTE=1` in ComfyUI's environment — it is your call to expose the routes to
-  whoever can reach that port.
+  socket's peer address, never a header. Two ways to widen it, both set in ComfyUI's
+  environment: `CF_MF_TRUSTED_PROXIES=<address or network, comma-separated>` serves the
+  requests that come through a reverse proxy on another host (a router in front of several
+  ComfyUI servers: name the router's address, the rest of the network still gets a 403);
+  `CF_MF_ALLOW_REMOTE=1` serves every peer, for a container with a mapped port (the browser
+  then arrives from the bridge address) or a trusted single-user network — it is your call to
+  expose the routes to whoever can reach that port.
 - **Host allow-list.** A model is only fetched from `huggingface.co`, `hf.co`, `civitai.com`,
   `github.com`, and the CDNs those redirect to (`githubusercontent.com`,
   `r2.cloudflarestorage.com`) — subdomains included, look-alikes excluded. Redirects are
@@ -248,6 +251,9 @@ and `tests/test_routes.py`:
 **Upgrading to 1.2:** if you used the popup from a browser on another machine, it now shows
 a 403 message until `CF_MF_ALLOW_REMOTE=1` is set on the ComfyUI side.
 
+**1.3:** `CF_MF_TRUSTED_PROXIES` for a reverse proxy on another host, so that
+`CF_MF_ALLOW_REMOTE=1` is no longer the only answer behind a router.
+
 ---
 
 ## Architecture
@@ -260,7 +266,7 @@ a 403 message until `CF_MF_ALLOW_REMOTE=1` is set on the ComfyUI side.
 | `fetcher/downloader.py` | queue + worker, resumable `.part` writes, websocket progress |
 | `fetcher/routes.py` | the `/cf_mf/*` API; blocking I/O runs off the event loop |
 | `fetcher/hf_token.py` | token storage, validation, and the HuggingFace-only auth header |
-| `fetcher/access.py` | the loopback-only gate on every route (`CF_MF_ALLOW_REMOTE` opt-out) |
+| `fetcher/access.py` | the loopback-only gate on every route (`CF_MF_TRUSTED_PROXIES`, `CF_MF_ALLOW_REMOTE`) |
 | `fetcher/urlpolicy.py` | host allow-list (`CF_MF_ALLOWED_HOSTS`, `HF_ENDPOINT`) and the only redirect-following code |
 | `web/main.js` | top-bar button, badge, note collection |
 | `web/popup.js` | the panel: rows, destinations, downloads, token, per-workflow state |

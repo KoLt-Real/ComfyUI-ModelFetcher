@@ -214,6 +214,24 @@ async def main():
     r = await status_h(FakeReq(None, remote="192.168.1.20"))
     ck("the opt-out is read live: unset -> refused again", r.status == 403, r.status)
 
+    # --- trusted proxies: the named addresses or networks pass, nobody else -------------
+    os.environ["CF_MF_TRUSTED_PROXIES"] = "10.40.10.237, 192.168.1.0/24, garbage, 2001:db8::/32"
+    try:
+        for remote in ("10.40.10.237", "192.168.1.20", "2001:db8::7"):
+            r = await status_h(FakeReq(None, remote=remote))
+            ck(f"trusted proxy {remote} -> served", r.status == 200, (remote, r.status))
+        for remote in ("10.40.10.238", "203.0.113.9", "192.168.2.1", None):
+            r = await status_h(FakeReq(None, remote=remote))
+            ck(f"peer {remote} outside the trusted list -> 403", r.status == 403, (remote, r.status))
+        r = await status_h(FakeReq(None, remote="10.40.10.238", headers={"X-Forwarded-For": "10.40.10.237"}))
+        ck("a forged X-Forwarded-For does not make a trusted proxy", r.status == 403, r.status)
+        ck("the 403 names both variables",
+           "CF_MF_TRUSTED_PROXIES" in body_of(await status_h(FakeReq(None, remote="10.0.0.5")))["message"])
+    finally:
+        del os.environ["CF_MF_TRUSTED_PROXIES"]
+    r = await status_h(FakeReq(None, remote="10.40.10.237"))
+    ck("the proxy list is read live: unset -> refused again", r.status == 403, r.status)
+
 asyncio.run(main())
 print(f"\n{'FAILURES: ' + ', '.join(fails) if fails else 'async routes OK'}")
 sys.exit(1 if fails else 0)

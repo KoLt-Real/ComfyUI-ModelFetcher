@@ -89,8 +89,10 @@ tests/               see below — run them
 13. **Every `/cf_mf` route is loopback-only.** `access.local_only` wraps all eight handlers
    (`@routes.post(...)` *above* `@access.local_only`, so the registered function is the gated
    one) and reads `request.remote` — aiohttp's socket peername — never a header such as
-   `X-Forwarded-For`. The only opt-out is the server's environment (`CF_MF_ALLOW_REMOTE=1`):
-   a request can never open the gate for itself. A new route gets the decorator, no
+   `X-Forwarded-For`. The only ways to widen it are the server's environment:
+   `CF_MF_TRUSTED_PROXIES` (addresses or networks whose requests are served, for a reverse
+   proxy on another host; a malformed entry is ignored, it never opens anything) and
+   `CF_MF_ALLOW_REMOTE=1` (every peer): a request can never open the gate for itself. A new route gets the decorator, no
    exceptions: `analyze` makes outbound requests and returns absolute paths, `status` leaks
    state, everything else mutates.
 14. **Only allow-listed hosts are ever contacted, on every hop.** `urlpolicy.check_url()` is
